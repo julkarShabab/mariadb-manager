@@ -1,0 +1,6 @@
+# Never upload credentials, dumps or logs
+.my.cnf
+my.cnf
+*.sql
+*.sql.gz
+*.log
