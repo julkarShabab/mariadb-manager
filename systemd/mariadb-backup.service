@@ -1,0 +1,10 @@
+[Unit]
+Description=MariaDB Automated Backup Manager
+After=network.target mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/shabab/scripts/mariadb-manager.sh --yes backup --all
+
+[Install]
+WantedBy=multi-user.target

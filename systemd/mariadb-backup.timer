@@ -1,0 +1,12 @@
+[Unit]
+Description=Run MariaDB Backup Daily
+Requires=mariadb-backup.service
+
+[Timer]
+OnCalendar=*-*-* 16:30:00
+
+# If the server was turned off at 2:00 AM, run it immediately when it boots back up
+Persistent=true
+
+[Install]
+WantedBy=timers.target
