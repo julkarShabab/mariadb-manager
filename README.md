@@ -1,5 +1,7 @@
 # mariadb-manager
 
+![Architecture diagram](docs/architecture.png)
+
 A single Bash script to back up, restore, delete, and clean up MariaDB databases. Dumps are stored as gzip files (`.sql.gz`), and dumps older than a set number of days (default 7) are removed automatically.
 
 If you leave out a database or file name, the script shows a numbered menu so you pick by number instead of typing long names.
