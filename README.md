@@ -4,6 +4,8 @@ A single Bash script to back up, restore, delete, and clean up MariaDB databases
 
 If you leave out a database or file name, the script shows a numbered menu so you pick by number instead of typing long names.
 
+The script can run on its own every night through a systemd timer (see [Automatic daily backups](#automatic-daily-backups-systemd-timer)).
+
 ## Features
 
 - **backup**: dump one database or all databases to a timestamped `.sql.gz` file
@@ -18,6 +20,7 @@ If you leave out a database or file name, the script shows a numbered menu so yo
 - Integrity check (`gzip -t`) after every backup; corrupt or partial files are deleted
 - Confirmation prompts before restore, delete, and drop
 - Every action is logged with a timestamp
+- Can be automated with a systemd timer (daily backup, catches up on missed runs)
 
 ## Requirements
 
@@ -25,14 +28,15 @@ If you leave out a database or file name, the script shows a numbered menu so yo
 - MariaDB (the script uses `mariadb-dump` / `mariadb`, and falls back to `mysqldump` / `mysql` on older versions)
 - `gzip`, `find`, `sudo`
 - A MariaDB login (see "Login setup" below)
+- systemd (only needed for the automatic daily backup)
 
 ## Installation
 
 ```bash
 # Run in terminal (any directory)
 git clone https://github.com/julkarShabab/mariadb-manager.git   # download the repo
-cd mariadb-manager                                          # go into the folder
-chmod +x mariadb-manager.sh                                 # make the script runnable
+cd mariadb-manager                                              # go into the folder
+chmod +x mariadb-manager.sh                                     # make the script runnable
 ```
 
 Or, if you only copy the file by hand:
@@ -53,7 +57,7 @@ First test whether you need it. If this prints a result without asking for a pas
 sudo mariadb -e "SELECT 1;"     # works without a password = no .my.cnf needed
 ```
 
-If you get `Access denied`, create the file with your **MariaDB** password (not your sudo password):
+If you get `Access denied`, create the file with your MariaDB password (not your sudo password):
 
 ```bash
 # Run in terminal
@@ -80,6 +84,8 @@ Never commit `.my.cnf` to Git. The `.gitignore` in this repo already blocks it.
     all-databases_2026-10-12_10-00-00.sql.gz
 /var/log/mariadb-manager.log               <- log of every action
 ~/.my.cnf                                  <- MariaDB login (chmod 600)
+/etc/systemd/system/mariadb-backup.service <- automation: what to run
+/etc/systemd/system/mariadb-backup.timer   <- automation: when to run it
 ```
 
 If `/var/log` is not writable, the log falls back to `~/mariadb-manager.log`.
@@ -93,9 +99,9 @@ Syntax:
 sudo ./mariadb-manager.sh [flags] <command> [arguments]   # flags first, then command, then arguments
 ```
 
-1. **Flags** (optional) change a setting for this run only. They go before the command.
-2. **Command** (required) is the action: `backup`, `restore`, `delete`, `drop`, `cleanup`, `list`, `dbs`.
-3. **Arguments** (optional) are what the command works on, such as a database or file name. If you leave them out, a numbered menu appears.
+- **Flags** (optional) change a setting for this run only. They go before the command.
+- **Command** (required) is the action: `backup`, `restore`, `delete`, `drop`, `cleanup`, `list`, `dbs`.
+- **Arguments** (optional) are what the command works on, such as a database or file name. If you leave them out, a numbered menu appears.
 
 ### Commands
 
@@ -131,9 +137,9 @@ sudo ./mariadb-manager.sh cleanup                 # delete dumps older than 7 da
 
 Restoring an `all-databases_*` dump does not ask for a target name. It restores every database in the file, and existing data can be overwritten.
 
-## Flags
+### Flags
 
-Flags go **before** the command.
+Flags go before the command.
 
 | Flag | What it changes | Default |
 |---|---|---|
@@ -156,9 +162,94 @@ Use `--yes` with care: it also skips the confirmation for `delete` and `drop`.
 
 ## How the 7-day cleanup works
 
-Cleanup runs automatically at the end of every successful `backup`, and you can run it by hand with `cleanup`. It deletes `.sql.gz` files in the backup folder whose modified time is older than the retention days, and logs each file it removes.
+Cleanup runs automatically at the end of every successful backup, and you can run it by hand with `cleanup`. It deletes `.sql.gz` files in the backup folder whose modified time is older than the retention days, and logs each file it removes.
 
-There is no scheduler built in. Backups are **manual**: nothing runs unless you run the script. If you stop taking backups, old dumps stay until you run `backup` or `cleanup` again.
+The script has no scheduler of its own. For daily backups, use the systemd timer below. With the timer running, cleanup happens every night as part of the backup.
+
+## Automatic daily backups (systemd timer)
+
+A systemd timer runs `backup --all` every day at 02:00. It uses two small files: a **service** (what to run) and a **timer** (when to run it). The timer has `Persistent=true`, so if the server was off at 02:00, the backup runs as soon as the server is back up.
+
+> Adjust the script path in `ExecStart` to wherever you placed the script.
+
+### 1. Create the service file
+
+```bash
+# Run in terminal
+sudo nano /etc/systemd/system/mariadb-backup.service   # create the service file
+```
+
+```ini
+# /etc/systemd/system/mariadb-backup.service
+[Unit]
+Description=MariaDB backup (mariadb-manager)
+After=mariadb.service
+
+[Service]
+Type=oneshot
+# --yes skips prompts, backup --all dumps every database, 7-day cleanup runs after it
+ExecStart=/home/shabab/scripts/mariadb-manager.sh --yes backup --all
+```
+
+### 2. Create the timer file
+
+```bash
+# Run in terminal
+sudo nano /etc/systemd/system/mariadb-backup.timer     # create the timer file
+```
+
+```ini
+# /etc/systemd/system/mariadb-backup.timer
+[Unit]
+Description=Run MariaDB backup daily at 02:00
+
+[Timer]
+# every day at 02:00 (server time)
+OnCalendar=*-*-* 02:00:00
+# if the server was off at 02:00, run the missed backup at next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+### 3. Enable and start it
+
+```bash
+# Run in terminal
+sudo systemctl daemon-reload                     # make systemd read the new files
+sudo systemctl enable --now mariadb-backup.timer # start now and on every boot
+systemctl list-timers mariadb-backup.timer       # confirm the next run time
+```
+
+The service runs as root, so the login comes from the Unix socket or from `/root/.my.cnf` (see "Login setup").
+
+### Test it without waiting for 02:00
+
+```bash
+# Run in terminal
+sudo systemctl start mariadb-backup.service      # run the backup job once, right now
+systemctl status mariadb-backup.service          # did it succeed?
+sudo ./mariadb-manager.sh list                   # confirm the new .sql.gz exists
+```
+
+### Watch the logs
+
+```bash
+# Run in terminal
+journalctl -u mariadb-backup.service -f          # follow systemd output live (Ctrl+C to stop)
+journalctl -u mariadb-backup.service -n 50       # last 50 lines
+sudo tail -n 30 /var/log/mariadb-manager.log     # the script's own log
+```
+
+### Pause or remove the automation
+
+```bash
+# Run in terminal
+sudo systemctl disable --now mariadb-backup.timer   # stop the timer and do not start it on boot
+```
+
+Cron works too, but the systemd timer was chosen because `Persistent=true` catches up on missed runs.
 
 ## Suggested first test
 
@@ -188,23 +279,27 @@ Only `backup`, `restore`, `delete`, `drop`, `cleanup`, and errors write to the l
 |---|---|
 | `Access denied for user` | Wrong or missing login. Check `~/.my.cnf` or pass `--creds`. |
 | `Cannot create /var/backups/mariadb` | Run with `sudo`, or choose a writable folder with `--dir`. |
-| `no databases found or cannot connect` | MariaDB is not running or login failed. Check `sudo systemctl status mariadb`. |
+| `no databases found` or cannot connect | MariaDB is not running or login failed. Check `sudo systemctl status mariadb`. |
 | `file not found` | Wrong name. Run `list`, or run `restore` with no arguments and pick from the menu. |
 | `Invalid choice` | You typed something other than a number from the list. |
 | `invalid database name` | Only letters, digits, `_`, `$`, and `-` are allowed. |
 | `archive is corrupt` / `dump failed` | The partial file was removed. Check the log and free disk space with `df -h`. |
+| Timer never runs | Check `systemctl list-timers mariadb-backup.timer`. If it is missing, run `sudo systemctl enable --now mariadb-backup.timer`. |
+| Timer runs but no new dump | Run `systemctl status mariadb-backup.service` and `journalctl -u mariadb-backup.service -n 50`. Usually a login problem (the service runs as root). |
 
 ## Safety notes
 
-1. `drop` and `restore` change real data. Back up first.
-2. Keep `~/.my.cnf` at `chmod 600` and the backup folder at `chmod 700`.
-3. Never commit `.my.cnf`, dumps, or logs to Git.
-4. Backups on the same disk do not protect against disk failure. Copy important dumps to another machine.
-5. Using the MariaDB `root` account is the simplest option. A dedicated backup user with limited rights is safer long term.
+- `drop` and `restore` change real data. Back up first.
+- Keep `~/.my.cnf` at `chmod 600` and the backup folder at `chmod 700`.
+- Never commit `.my.cnf`, dumps, or logs to Git.
+- Backups on the same disk do not protect against disk failure. Copy important dumps to another machine.
+- Using the MariaDB root account is the simplest option. A dedicated backup user with limited rights is safer long term.
+- The automatic job uses `--yes`, which is safe for `backup` but would skip confirmations for `delete` and `drop`. Keep the timer limited to `backup --all`.
 
 ## Known limits
 
-1. Flags must come before the command (`--days 14 cleanup`, not `cleanup --days 14`).
-2. Retention uses the file's modified time, not the date in the filename.
-3. `delete --db mydb` matches `mydb_*`, so a database named `mydb_test` would also match.
-4. Row counts in `dbs <db>` are estimates for InnoDB tables.
+- Flags must come before the command (`--days 14 cleanup`, not `cleanup --days 14`).
+- Retention uses the file's modified time, not the date in the filename.
+- `delete --db mydb` matches `mydb_*`, so a database named `mydb_test` would also match.
+- Row counts in `dbs <db>` are estimates for InnoDB tables.
+- Backups stay on the same server. There is no built-in copy to another machine.
